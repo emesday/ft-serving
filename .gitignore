@@ -1,0 +1,6 @@
+.idea
+target
+annoy-index-*
+test.ann
+*.elapsed.log
+exp

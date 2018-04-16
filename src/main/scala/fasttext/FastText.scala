@@ -1,0 +1,198 @@
+package fasttext
+
+import java.io.{BufferedInputStream, FileInputStream}
+
+import scala.collection.mutable.ArrayBuffer
+
+case class Line(labels: Array[Int], words: Array[Long])
+
+case class Entry(wid: Int, count: Long, tpe: Byte, subWords: Array[Long])
+
+object FastText {
+  val EOS = "</s>"
+  val BOW = "<"
+  val EOW = ">"
+
+  val FASTTEXT_VERSION = 12; /* Version 1b */
+  val FASTTEXT_FILEFORMAT_MAGIC_INT32 = 793712314;
+
+  val MODEL_CBOW = 1
+  val MODEL_SG = 2
+  val MODEL_SUP = 3
+
+  val LOSS_HS = 1
+  val LOSS_NS = 2
+  val LOSS_SOFTMAX = 3
+
+  def tokenize(in: String): Array[String] = in.split("\\s+") ++ Array("</s>")
+
+  def getSubwords(word: String, minn: Int, maxn: Int): Array[String] = {
+    val l = math.max(minn, 1)
+    val u = math.min(maxn, word.length)
+    val r = l to u flatMap word.sliding
+    r.filterNot(s => s == BOW || s == EOW).toArray
+  }
+
+  def hash(str: String): Long = {
+    var h = 2166136261L.toInt
+    for (b <- str.getBytes) {
+      h = (h ^ b) * 16777619
+    }
+    h & 0xffffffffL
+  }
+}
+
+class FastText(modelFile: String) {
+
+  import FastText._
+
+  val fis = new FileInputStream(modelFile)
+  val is = new LittleEndianDataInputStream(new BufferedInputStream(fis))
+
+  require(is.readInt() == FASTTEXT_FILEFORMAT_MAGIC_INT32)
+  require(is.readInt() == FASTTEXT_VERSION)
+
+  val dim = is.readInt()
+  val ws = is.readInt()
+  val epoch = is.readInt()
+  val minCount = is.readInt()
+  val neg = is.readInt()
+  val wordNgrams = is.readInt()
+  val loss = is.readInt()
+  val model = is.readInt()
+  val bucket = is.readInt()
+  val minn = is.readInt()
+  val maxn = is.readInt()
+  val lrUpdateRate = is.readInt()
+  val t = is.readDouble()
+
+  println(
+    s"""dim:          $dim
+       |ws :          $ws
+       |epoch:        $epoch
+       |minCount:     $minCount
+       |neg:          $neg
+       |wordNgrams:   $wordNgrams
+       |loss:         $loss
+       |model:        $model
+       |bucket:       $bucket
+       |minn:         $minn
+       |maxn:         $maxn
+       |lrUpdateRate: $lrUpdateRate
+       |t:            $t
+       |""".stripMargin)
+
+  val size = is.readInt()
+  val nwords = is.readInt()
+  val nlabels = is.readInt()
+  val ntokens = is.readLong()
+  val pruneidxSize = is.readLong()
+
+  require(pruneidxSize == -1, "not implemented")
+
+  println(
+    s"""size: $size
+       |nwords: $nwords
+       |nlabels: $nlabels
+       |ntokens: $ntokens
+       |pruneIdxSize: $pruneidxSize
+      """.stripMargin)
+
+  val vocab = Array.tabulate(size) { wid =>
+    val wordBuffer = new ArrayBuffer[Byte]
+    var b = is.read()
+    while (b != 0) {
+      wordBuffer += b.toByte
+      b = is.read()
+    }
+    val count = is.readLong()
+    val tpe = is.readByte()
+    val word = new String(wordBuffer.toArray, "UTF-8")
+    val subwords = if (word != EOS) Array(wid.toLong) ++ computeSubwords(BOW + word + EOW) else Array(wid.toLong)
+    word -> Entry(wid, count, tpe, subwords)
+  }.toMap
+
+  require(!is.readBoolean(), "not implemented")
+  val wi = {
+    val m = is.readLong().toInt
+    val n = is.readLong().toInt
+    Array.fill(m)(Array.fill(n)(is.readFloat()))
+  }
+  require(!is.readBoolean(), "not implemented")
+  val wo = {
+    val m = is.readLong().toInt
+    val n = is.readLong().toInt
+    Array.fill(m)(Array.fill(n)(is.readFloat()))
+  }
+
+  fis.close()
+
+  def computeSubwords(word: String): Array[Long] =
+    getSubwords(word, minn, maxn).map { w => nwords + (hash(w) % bucket.toLong) }
+
+  def getLine(in: String) = {
+    val tokens = tokenize(in)
+    val words = new ArrayBuffer[Long]()
+    val labels = new ArrayBuffer[Int]()
+    tokens foreach { token =>
+      val Entry(wid, count, tpe, subWords) = vocab.getOrElse(token, Entry(-1, 0L, 1, Array.emptyLongArray))
+      if (tpe == 0) {
+        // addSubwords
+        if (wid < 0) { // OOV
+          if (token != EOS) {
+            words ++= computeSubwords(BOW + token + EOW)
+          }
+        } else {
+          words ++= vocab(token).subWords
+        }
+      } else if (tpe == 1 && wid > 0) {
+        labels += wid - nwords
+      }
+    }
+    Line(labels.toArray, words.toArray)
+  }
+
+  def computeHidden(input: Array[Long]): Array[Float] = {
+    val hidden = new Array[Float](wi(0).length)
+    for (row <- input.map(_.toInt).map(wi)) {
+      var i = 0
+      while (i < hidden.length) {
+        hidden(i) += row(i) / input.length
+        i += 1
+      }
+    }
+    hidden
+  }
+
+  def predict(line: Line, k: Int = 1) = {
+    val hidden = computeHidden(line.words)
+    val output = wo.map { o =>
+      o.zip(hidden).map(a => a._1 * a._2).sum
+    }
+    val max = output.max
+    var i = 0
+    var z = 0.0f
+    while (i < output.length) {
+      output(i) = math.exp((output(i) - max).toDouble).toFloat
+      z += output(i)
+      i += 1
+    }
+    i = 0
+    while (i < output.length) {
+      output(i) /= z
+      i += 1
+    }
+    output.zipWithIndex.sortBy(-_._1).take(k)
+  }
+}
+
+object Test {
+  def main(args: Array[String]): Unit = {
+    val lines = "__label__1 열심히 평창 동계 올림픽을 응원합니다\n__label__1 평창 동계올림픽 함께 응원합니다\n__label__1 좋은밤 기쁨가득 하시고 평창 동계 올림픽 응원도 잘하시고 저녁 맛난것도 든든히 잘드시고 건강하세요\n__label__0 갱이 생일축하한당\n__label__0 생축\n__label__0 생축입니당행복하세요".split("\n")
+    val fastText = new FastText("/Users/emeth.kim/d/g/fastText/dataset/sample.model.bin")
+    for (line0 <- lines) {
+      val line = fastText.getLine(line0)
+      fastText.predict(line, 1).foreach(println)
+    }
+  }
+}
