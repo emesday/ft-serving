@@ -161,15 +161,3 @@ class FastText(name: String) extends AutoCloseable {
   }
 
 }
-
-object Test {
-  def main(args: Array[String]): Unit = {
-    val lines = "__label__1 열심히 평창 동계 올림픽을 응원합니다\n__label__1 평창 동계올림픽 함께 응원합니다\n__label__1 좋은밤 기쁨가득 하시고 평창 동계 올림픽 응원도 잘하시고 저녁 맛난것도 든든히 잘드시고 건강하세요\n__label__0 갱이 생일축하한당\n__label__0 생축\n__label__0 생축입니당행복하세요".split("\n")
-    val fastText = new FastText("exp/output")
-    for (line0 <- lines) {
-      val line = fastText.getLine(line0)
-      fastText.predict(line, 1).foreach(println)
-    }
-    fastText.close()
-  }
-}
