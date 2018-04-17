@@ -1,20 +1,24 @@
 package fasttext
 
-import java.io.{BufferedInputStream, FileInputStream}
+import java.nio.{ByteBuffer, ByteOrder}
+import java.util
 
+import org.rocksdb.{ColumnFamilyDescriptor, ColumnFamilyHandle, DBOptions, RocksDB}
+
+import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
 case class Line(labels: Array[Int], words: Array[Long])
 
-case class Entry(wid: Int, count: Long, tpe: Byte, subWords: Array[Long])
+case class Entry(wid: Int, count: Long, tpe: Byte, subwords: Array[Long])
 
 object FastText {
   val EOS = "</s>"
   val BOW = "<"
   val EOW = ">"
 
-  val FASTTEXT_VERSION = 12; /* Version 1b */
-  val FASTTEXT_FILEFORMAT_MAGIC_INT32 = 793712314;
+  val FASTTEXT_VERSION = 12 // Version 1b
+  val FASTTEXT_FILEFORMAT_MAGIC_INT32 = 793712314
 
   val MODEL_CBOW = 1
   val MODEL_SG = 2
@@ -40,102 +44,68 @@ object FastText {
     }
     h & 0xffffffffL
   }
+
 }
 
-class FastText(modelFile: String) {
+class FastText(name: String) extends AutoCloseable {
 
   import FastText._
 
-  val fis = new FileInputStream(modelFile)
-  val is = new LittleEndianDataInputStream(new BufferedInputStream(fis))
+  val dbOptions = new DBOptions()
+  val descriptors = new java.util.LinkedList[ColumnFamilyDescriptor]()
+  descriptors.add(new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY))
+  descriptors.add(new ColumnFamilyDescriptor("vocab".getBytes()))
+  descriptors.add(new ColumnFamilyDescriptor("i".getBytes()))
+  descriptors.add(new ColumnFamilyDescriptor("o".getBytes()))
+  val handles = new util.LinkedList[ColumnFamilyHandle]()
+  val db = RocksDB.openReadOnly(dbOptions, name, descriptors, handles)
+  val args = FastTextArgs.fromByteArray(db.get(handles.get(0), "args".getBytes()))
 
-  require(is.readInt() == FASTTEXT_FILEFORMAT_MAGIC_INT32)
-  require(is.readInt() == FASTTEXT_VERSION)
+  val defaultHandle = handles.get(0)
+  val vocabHandle = handles.get(1)
+  val inputVectorHandle = handles.get(2)
+  val outputVectorHandle = handles.get(3)
 
-  val dim = is.readInt()
-  val ws = is.readInt()
-  val epoch = is.readInt()
-  val minCount = is.readInt()
-  val neg = is.readInt()
-  val wordNgrams = is.readInt()
-  val loss = is.readInt()
-  val model = is.readInt()
-  val bucket = is.readInt()
-  val minn = is.readInt()
-  val maxn = is.readInt()
-  val lrUpdateRate = is.readInt()
-  val t = is.readDouble()
+  val wo = loadOutputVectors()
 
-  println(
-    s"""dim:          $dim
-       |ws :          $ws
-       |epoch:        $epoch
-       |minCount:     $minCount
-       |neg:          $neg
-       |wordNgrams:   $wordNgrams
-       |loss:         $loss
-       |model:        $model
-       |bucket:       $bucket
-       |minn:         $minn
-       |maxn:         $maxn
-       |lrUpdateRate: $lrUpdateRate
-       |t:            $t
-       |""".stripMargin)
+  println(args)
 
-  val size = is.readInt()
-  val nwords = is.readInt()
-  val nlabels = is.readInt()
-  val ntokens = is.readLong()
-  val pruneidxSize = is.readLong()
+  private def getVector(handle: ColumnFamilyHandle, key: Long): Array[Float] = {
+    val keyBytes = ByteBuffer.allocate(8).putLong(key).array()
+    val bb = ByteBuffer.wrap(db.get(handle, keyBytes)).order(ByteOrder.LITTLE_ENDIAN)
+    Array.fill(args.dim)(bb.getFloat)
+  }
 
-  require(pruneidxSize == -1, "not implemented")
+  private def loadOutputVectors(): Array[Array[Float]] =
+    Array.tabulate(args.nlabels)(key => getVector(outputVectorHandle, key.toLong))
 
-  println(
-    s"""size: $size
-       |nwords: $nwords
-       |nlabels: $nlabels
-       |ntokens: $ntokens
-       |pruneIdxSize: $pruneidxSize
-      """.stripMargin)
+  def getInputVector(key: Long): Array[Float] = getVector(inputVectorHandle, key)
 
-  val vocab = Array.tabulate(size) { wid =>
-    val wordBuffer = new ArrayBuffer[Byte]
-    var b = is.read()
-    while (b != 0) {
-      wordBuffer += b.toByte
-      b = is.read()
+  def getOutputVector(key: Long): Array[Float] = getVector(outputVectorHandle, key)
+
+  def getEntry(word: String): Entry = {
+    val raw = db.get(vocabHandle, word.getBytes("UTF-8"))
+    if (raw == null) {
+      Entry(-1, 0L, 1, Array.emptyLongArray)
+    } else {
+      val bb = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
+      val wid = bb.getInt
+      val count = bb.getLong
+      val tpe = bb.get
+      val subwords = if (word != EOS && tpe == 0) Array(wid.toLong) ++ computeSubwords(BOW + word + EOW) else Array(wid.toLong)
+      Entry(wid, count, tpe, subwords)
     }
-    val count = is.readLong()
-    val tpe = is.readByte()
-    val word = new String(wordBuffer.toArray, "UTF-8")
-    val subwords = if (word != EOS) Array(wid.toLong) ++ computeSubwords(BOW + word + EOW) else Array(wid.toLong)
-    word -> Entry(wid, count, tpe, subwords)
-  }.toMap
-
-  require(!is.readBoolean(), "not implemented")
-  val wi = {
-    val m = is.readLong().toInt
-    val n = is.readLong().toInt
-    Array.fill(m)(Array.fill(n)(is.readFloat()))
   }
-  require(!is.readBoolean(), "not implemented")
-  val wo = {
-    val m = is.readLong().toInt
-    val n = is.readLong().toInt
-    Array.fill(m)(Array.fill(n)(is.readFloat()))
-  }
-
-  fis.close()
 
   def computeSubwords(word: String): Array[Long] =
-    getSubwords(word, minn, maxn).map { w => nwords + (hash(w) % bucket.toLong) }
+    getSubwords(word, args.minn, args.maxn).map { w => args.nwords + (hash(w) % args.bucket.toLong) }
 
-  def getLine(in: String) = {
+  def getLine(in: String): Line = {
     val tokens = tokenize(in)
     val words = new ArrayBuffer[Long]()
     val labels = new ArrayBuffer[Int]()
     tokens foreach { token =>
-      val Entry(wid, count, tpe, subWords) = vocab.getOrElse(token, Entry(-1, 0L, 1, Array.emptyLongArray))
+      val Entry(wid, count, tpe, subwords) = getEntry(token)
       if (tpe == 0) {
         // addSubwords
         if (wid < 0) { // OOV
@@ -143,18 +113,18 @@ class FastText(modelFile: String) {
             words ++= computeSubwords(BOW + token + EOW)
           }
         } else {
-          words ++= vocab(token).subWords
+          words ++= subwords
         }
       } else if (tpe == 1 && wid > 0) {
-        labels += wid - nwords
+        labels += wid - args.nwords
       }
     }
     Line(labels.toArray, words.toArray)
   }
 
   def computeHidden(input: Array[Long]): Array[Float] = {
-    val hidden = new Array[Float](wi(0).length)
-    for (row <- input.map(_.toInt).map(wi)) {
+    val hidden = new Array[Float](args.dim)
+    for (row <- input.map(getInputVector)) {
       var i = 0
       while (i < hidden.length) {
         hidden(i) += row(i) / input.length
@@ -184,15 +154,22 @@ class FastText(modelFile: String) {
     }
     output.zipWithIndex.sortBy(-_._1).take(k)
   }
+
+  def close(): Unit = {
+    handles.asScala.foreach(_.close())
+    db.close()
+  }
+
 }
 
 object Test {
   def main(args: Array[String]): Unit = {
     val lines = "__label__1 열심히 평창 동계 올림픽을 응원합니다\n__label__1 평창 동계올림픽 함께 응원합니다\n__label__1 좋은밤 기쁨가득 하시고 평창 동계 올림픽 응원도 잘하시고 저녁 맛난것도 든든히 잘드시고 건강하세요\n__label__0 갱이 생일축하한당\n__label__0 생축\n__label__0 생축입니당행복하세요".split("\n")
-    val fastText = new FastText("/Users/emeth.kim/d/g/fastText/dataset/sample.model.bin")
+    val fastText = new FastText("exp/output")
     for (line0 <- lines) {
       val line = fastText.getLine(line0)
       fastText.predict(line, 1).foreach(println)
     }
+    fastText.close()
   }
 }

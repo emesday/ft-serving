@@ -5,6 +5,7 @@ version := "0.1.2-SNAPSHOT"
 scalaVersion := "2.11.8"
 
 libraryDependencies ++= Seq(
+  "org.rocksdb" % "rocksdbjni" % "5.11.3",
   "org.scalatest" %% "scalatest" % "2.2.6" % "test"
 )
 
