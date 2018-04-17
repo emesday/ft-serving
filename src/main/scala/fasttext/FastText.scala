@@ -51,24 +51,33 @@ class FastText(name: String) extends AutoCloseable {
 
   import FastText._
 
-  val dbOptions = new DBOptions()
-  val descriptors = new java.util.LinkedList[ColumnFamilyDescriptor]()
+  private val dbOptions = new DBOptions()
+  private val descriptors = new java.util.LinkedList[ColumnFamilyDescriptor]()
   descriptors.add(new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY))
   descriptors.add(new ColumnFamilyDescriptor("vocab".getBytes()))
   descriptors.add(new ColumnFamilyDescriptor("i".getBytes()))
   descriptors.add(new ColumnFamilyDescriptor("o".getBytes()))
-  val handles = new util.LinkedList[ColumnFamilyHandle]()
-  val db = RocksDB.openReadOnly(dbOptions, name, descriptors, handles)
-  val args = FastTextArgs.fromByteArray(db.get(handles.get(0), "args".getBytes()))
+  private val handles = new util.LinkedList[ColumnFamilyHandle]()
+  private val db = RocksDB.openReadOnly(dbOptions, name, descriptors, handles)
 
-  val defaultHandle = handles.get(0)
-  val vocabHandle = handles.get(1)
-  val inputVectorHandle = handles.get(2)
-  val outputVectorHandle = handles.get(3)
+  private val defaultHandle = handles.get(0)
+  private val vocabHandle = handles.get(1)
+  private val inputVectorHandle = handles.get(2)
+  private val outputVectorHandle = handles.get(3)
 
-  val wo = loadOutputVectors()
+  private val args = FastTextArgs.fromByteArray(db.get(defaultHandle, "args".getBytes("UTF-8")))
+  private val wo = loadOutputVectors()
+  private val labels = loadLabels()
 
   println(args)
+
+  require(args.magic == FASTTEXT_FILEFORMAT_MAGIC_INT32)
+  require(args.version == FASTTEXT_VERSION)
+
+  // only sup/softmax supported
+  // others are the future work.
+  require(args.model == MODEL_SUP)
+  require(args.loss == LOSS_SOFTMAX)
 
   private def getVector(handle: ColumnFamilyHandle, key: Long): Array[Float] = {
     val keyBytes = ByteBuffer.allocate(8).putLong(key).array()
@@ -78,6 +87,23 @@ class FastText(name: String) extends AutoCloseable {
 
   private def loadOutputVectors(): Array[Array[Float]] =
     Array.tabulate(args.nlabels)(key => getVector(outputVectorHandle, key.toLong))
+
+  private def loadLabels(): Array[String] = {
+    val result = new Array[String](args.nlabels)
+    val it = db.newIterator(defaultHandle)
+    var i = 0
+    it.seekToFirst()
+    while (it.isValid) {
+      val key = ByteBuffer.wrap(it.key()).getInt()
+      if (key < args.nlabels) {
+        require(i == key)
+        result(i) = new String(it.value(), "UTF-8")
+        i += 1
+      }
+      it.next()
+    }
+    result
+  }
 
   def getInputVector(key: Long): Array[Float] = getVector(inputVectorHandle, key)
 
@@ -134,7 +160,7 @@ class FastText(name: String) extends AutoCloseable {
     hidden
   }
 
-  def predict(line: Line, k: Int = 1) = {
+  def predict(line: Line, k: Int = 1): Array[(String, Float)] = {
     val hidden = computeHidden(line.words)
     val output = wo.map { o =>
       o.zip(hidden).map(a => a._1 * a._2).sum
@@ -152,7 +178,9 @@ class FastText(name: String) extends AutoCloseable {
       output(i) /= z
       i += 1
     }
-    output.zipWithIndex.sortBy(-_._1).take(k)
+    output.zipWithIndex.sortBy(-_._1).take(k).map { case (prob, i) =>
+      labels(i) -> prob
+    }
   }
 
   def close(): Unit = {

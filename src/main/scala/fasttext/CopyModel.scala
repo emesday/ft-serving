@@ -4,21 +4,23 @@ import java.io.{BufferedInputStream, FileInputStream, InputStream}
 import java.nio.{ByteBuffer, ByteOrder}
 import java.util
 
-import scala.collection.JavaConverters._
 import org.rocksdb._
 
+import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
 object CopyModel {
 
   def writeArgs(db: RocksDB, handle: ColumnFamilyHandle, args: FastTextArgs): Unit = {
-    val wo = new WriteOptions()
+    val wo = new WriteOptions().setDisableWAL(true).setSync(false)
     db.put(handle, wo, "args".getBytes("UTF-8"), args.serialize)
     wo.close()
+    println("done                                                      ")
   }
 
-  def writeVocab(is: InputStream, db: RocksDB, handle: ColumnFamilyHandle, args: FastTextArgs): Unit = {
-    val wo = new WriteOptions()
+  def writeVocab(is: InputStream, db: RocksDB,
+    vocabHandle: ColumnFamilyHandle, labelHandle: ColumnFamilyHandle, args: FastTextArgs): Unit = {
+    val wo = new WriteOptions().setDisableWAL(true).setSync(false)
     val bb = ByteBuffer.allocate(13).order(ByteOrder.LITTLE_ENDIAN)
     val wb = new ArrayBuffer[Byte]
     for (wid <- 0 until args.size) {
@@ -31,14 +33,23 @@ object CopyModel {
       }
       bb.putInt(wid)
       is.read(bb.array(), 4, 9)
-      db.put(handle, wo, wb.toArray, bb.array())
+      db.put(vocabHandle, wo, wb.toArray, bb.array())
+
+      if (bb.get(12) == 1) {
+        val label = wid - args.nwords
+        db.put(labelHandle, ByteBuffer.allocate(4).putInt(label).array(), wb.toArray)
+      }
+
+      if ((wid + 1) % 1000 == 0)
+        print(f"\rprocessing ${100 * (wid + 1) / args.size.toFloat}%.2f%%")
     }
+    println("\rdone                                                      ")
     wo.close()
   }
 
   def writeVectors(is: InputStream, db: RocksDB, handle: ColumnFamilyHandle, args: FastTextArgs): Unit = {
     require(is.read() == 0, "not implemented")
-    val wo = new WriteOptions()
+    val wo = new WriteOptions().setDisableWAL(true).setSync(false)
     val bb = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
     val key = ByteBuffer.allocate(8)
     val value = new Array[Byte](args.dim * 4)
@@ -52,18 +63,37 @@ object CopyModel {
       key.putLong(i)
       is.read(value)
       db.put(handle, wo, key.array(), value)
+      if ((i + 1) % 1000 == 0)
+        print(f"\rprocessing ${100 * (i + 1) / m.toFloat}%.2f%%")
       i += 1
     }
+    println("\rdone                                                      ")
     wo.close()
   }
 
+  def printHelp(): Unit = {
+    println("usage: CopyModel <in> <out>")
+  }
+
   def main(args: Array[String]): Unit = {
+    if (args.length != 2) {
+      printHelp()
+      return
+    }
+
     val in = args(0)
     val out = args(1)
 
     RocksDB.destroyDB(out, new Options)
 
-    val dbOptions = new DBOptions().setCreateIfMissing(true).setCreateMissingColumnFamilies(true)
+    val dbOptions = new DBOptions()
+      .setCreateIfMissing(true)
+      .setCreateMissingColumnFamilies(true)
+      .setAllowMmapReads(false)
+      .setMaxOpenFiles(500000)
+      .setDbWriteBufferSize(134217728)
+      .setMaxBackgroundCompactions(20)
+
     val descriptors = new java.util.LinkedList[ColumnFamilyDescriptor]()
     descriptors.add(new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY))
     descriptors.add(new ColumnFamilyDescriptor("vocab".getBytes()))
@@ -81,7 +111,7 @@ object CopyModel {
     println("step 1: writing args")
     writeArgs(db, handles.get(0), fastTextArgs)
     println("step 2: writing vocab")
-    writeVocab(is, db, handles.get(1), fastTextArgs)
+    writeVocab(is, db, handles.get(1), handles.get(0), fastTextArgs)
     println("step 3: writing input vectors")
     writeVectors(is, db, handles.get(2), fastTextArgs)
     println("step 4: writing output vectors")
