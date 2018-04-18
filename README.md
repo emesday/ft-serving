@@ -1,4 +1,4 @@
-# fastTextServing
+# ft-serving
 
 a minimum Scala implementation for serving the fastText models
 
