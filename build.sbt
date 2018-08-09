@@ -4,12 +4,10 @@ import scala.xml.{Comment, Elem, Node => XmlNode, NodeSeq => XmlNodeSeq}
 name := "ft-serving"
 
 val versions = new {
-  val rocksdb = "5.11.3"
   val scalatest = "2.2.6"
 }
 
 libraryDependencies ++= Seq(
-  "org.rocksdb" % "rocksdbjni" % versions.rocksdb,
   "org.scalatest" %% "scalatest" % versions.scalatest % "test"
 )
 

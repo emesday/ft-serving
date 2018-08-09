@@ -17,6 +17,5 @@ object Predict {
       }
     }
 
-    fastText.close()
   }
 }
