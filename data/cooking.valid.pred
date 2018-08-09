@@ -1,0 +1,10 @@
+__label__baking 0.0262882 __label__substitutions 0.0212992 __label__food-safety 0.0194147 __label__equipment 0.0175487
+__label__baking 0.0340842 __label__food-safety 0.0290665 __label__equipment 0.0219685 __label__bread 0.0204248
+__label__food-safety 0.0329294 __label__baking 0.0304089 __label__equipment 0.0217864 __label__bread 0.0198331
+__label__food-safety 0.0299586 __label__baking 0.0238818 __label__equipment 0.0192136 __label__bread 0.0146345
+__label__bread 0.136375 __label__baking 0.126209 __label__food-safety 0.0319173 __label__substitutions 0.0317349
+__label__food-safety 0.0436113 __label__baking 0.0265612 __label__equipment 0.0226312 __label__bread 0.0163384
+__label__baking 0.0977466 __label__bread 0.0676433 __label__substitutions 0.0438429 __label__food-safety 0.032439
+__label__baking 0.0529167 __label__substitutions 0.0410769 __label__food-safety 0.0329725 __label__equipment 0.0290761
+__label__food-safety 0.0620047 __label__equipment 0.028245 __label__baking 0.0275118 __label__chicken 0.0197459
+__label__food-safety 0.0349099 __label__baking 0.0244712 __label__equipment 0.0196565 __label__bread 0.016812

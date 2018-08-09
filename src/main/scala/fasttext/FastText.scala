@@ -6,9 +6,9 @@ import java.nio.{ByteBuffer, ByteOrder}
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
-case class Line(labels: Array[Int], words: Array[Long])
+case class Line(labels: Array[Int], words: Array[Int])
 
-case class Entry(wid: Int, count: Long, tpe: Byte, subwords: Array[Long])
+case class Entry(wid: Int, count: Long, tpe: Byte, subwords: Array[Int])
 
 object FastText {
   val EOS = "</s>"
@@ -43,8 +43,8 @@ object FastText {
     h & 0xffffffffL
   }
 
-  def computeSubwords(word: String, args: FastTextArgs): Array[Long] =
-    getSubwords(word, args.minn, args.maxn).map { w => args.nwords + (hash(w) % args.bucket.toLong) }
+  def computeSubwords(word: String, args: FastTextArgs): Array[Int] =
+    getSubwords(word, args.minn, args.maxn).map { w => args.nwords + (hash(w) % args.bucket.toLong).toInt }
 
   def readVocab(is: InputStream, args: FastTextArgs): (Map[String, Entry], Array[String]) = {
     val vocab = new mutable.HashMap[String, Entry]
@@ -66,7 +66,7 @@ object FastText {
       is.read(bb.array(), 0, 9)
       val count = bb.getLong
       val tpe = bb.get
-      val subwords = if (word != EOS && tpe == 0) Array(wid.toLong) ++ computeSubwords(BOW + word + EOW, args) else Array(wid.toLong)
+      val subwords = if (word != EOS && tpe == 0) Array(wid) ++ computeSubwords(BOW + word + EOW, args) else Array(wid)
       val entry = Entry(wid, count, tpe, subwords)
 
       vocab += word -> entry
@@ -82,6 +82,7 @@ object FastText {
 
   def readVectors(is: BufferedInputStream, args: FastTextArgs): Array[Array[Float]] = {
     require(is.read() == 0, "not implemented")
+
     val bb = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
     val floats = ByteBuffer.allocate(args.dim * 4).order(ByteOrder.LITTLE_ENDIAN)
     is.read(bb.array())
@@ -104,8 +105,7 @@ class FastText(name: String) extends Serializable {
   val is = new BufferedInputStream(new FileInputStream(name))
   private val args: FastTextArgs = FastTextArgs.fromInputStream(is)
   private val (vocab: Map[String, Entry], labels: Array[String]) = readVocab(is, args)
-  private val inputVectors: Map[Long, Array[Float]] =
-    readVectors(is, args).zipWithIndex.map { case (v, i) => i.toLong -> v }.toMap
+  private val inputVectors: Array[Array[Float]] = readVectors(is, args)
   private val outputVectors: Array[Array[Float]] = readVectors(is, args)
   is.close()
 
@@ -120,11 +120,11 @@ class FastText(name: String) extends Serializable {
   require(args.loss == LOSS_SOFTMAX)
 
   def getEntry(word: String): Entry =
-    vocab.getOrElse(word, Entry(-1, 0L, 1, Array.emptyLongArray))
+    vocab.getOrElse(word, Entry(-1, 0L, 1, Array.emptyIntArray))
 
   def getLine(in: String): Line = {
     val tokens = tokenize(in)
-    val words = new ArrayBuffer[Long]()
+    val words = new ArrayBuffer[Int]()
     val labels = new ArrayBuffer[Int]()
     tokens foreach { token =>
       val Entry(wid, count, tpe, subwords) = getEntry(token)
@@ -144,7 +144,7 @@ class FastText(name: String) extends Serializable {
     Line(labels.toArray, words.toArray)
   }
 
-  def computeHidden(input: Array[Long]): Array[Float] = {
+  def computeHidden(input: Array[Int]): Array[Float] = {
     val hidden = new Array[Float](args.dim)
     for (row <- input.map(inputVectors)) {
       var i = 0
@@ -156,8 +156,9 @@ class FastText(name: String) extends Serializable {
     hidden
   }
 
-  def predict(line: Line, k: Int = 1): Array[(String, Float)] = {
-    val hidden = computeHidden(line.words)
+  def predict(line: String, k: Int = 1): Array[(String, Float)] = {
+    val line1 = getLine(line)
+    val hidden = computeHidden(line1.words)
     val output = outputVectors.map { o =>
       o.zip(hidden).map(a => a._1 * a._2).sum
     }

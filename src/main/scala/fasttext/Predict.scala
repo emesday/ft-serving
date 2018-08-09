@@ -8,9 +8,8 @@ object Predict {
 
     var done = false
     while (!done) {
-      val line0 = scala.io.StdIn.readLine("input: ")
-      if (line0 != null) {
-        val line = fastText.getLine(line0)
+      val line = scala.io.StdIn.readLine("input: ")
+      if (line != null) {
         fastText.predict(line, k).foreach(println)
       } else {
         done = true
