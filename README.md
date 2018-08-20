@@ -10,5 +10,5 @@ a minimum Scala implementation for serving the fastText models
 # Supports
 
  1. supervised model / softmax loss
- 
- 
+   - quantization is also supported
+     - Currently, only quantized with `-qnorm=false -qout=false` is supported.
