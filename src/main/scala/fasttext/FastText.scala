@@ -1,10 +1,40 @@
 package fasttext
 
-import java.io.{BufferedInputStream, FileInputStream, InputStream}
-import java.nio.{ByteBuffer, ByteOrder}
+import java.io.{BufferedInputStream, FileInputStream}
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
+import scala.language.reflectiveCalls
+
+case class Args(
+  magic: Int, version: Int, dim: Int, ws: Int, epoch: Int,
+  minCount: Int, neg: Int, wordNgrams: Int, loss: Int, model: Int,
+  bucket: Int, minn: Int, maxn: Int, lrUpdateRate: Int, t: Double,
+  size: Int, nwords: Int, nlabels: Int, ntokens: Long, pruneidxSize: Long) {
+  override def toString: String = {
+    s"""magic:        $magic
+       |version:      $version
+       |dim:          $dim
+       |ws :          $ws
+       |epoch:        $epoch
+       |minCount:     $minCount
+       |neg:          $neg
+       |wordNgrams:   $wordNgrams
+       |loss:         $loss
+       |model:        $model
+       |bucket:       $bucket
+       |minn:         $minn
+       |maxn:         $maxn
+       |lrUpdateRate: $lrUpdateRate
+       |t:            $t
+       |size:         $size
+       |nwords:       $nwords
+       |nlabels:      $nlabels
+       |ntokens:      $ntokens
+       |pruneIdxSize: $pruneidxSize
+       |""".stripMargin
+  }
+}
 
 case class Line(labels: Array[Int], words: Array[Int])
 
@@ -43,29 +73,30 @@ object FastText {
     h & 0xffffffffL
   }
 
-  def computeSubwords(word: String, args: FastTextArgs): Array[Int] =
+  def computeSubwords(word: String, args: Args): Array[Int] =
     getSubwords(word, args.minn, args.maxn).map { w => args.nwords + (hash(w) % args.bucket.toLong).toInt }
 
-  def readVocab(is: InputStream, args: FastTextArgs): (Map[String, Entry], Array[String]) = {
+  def readArgs(in: LittleEndianDataInputStream): Args = {
+    Args(
+      in.getInt, in.getInt, in.getInt, in.getInt, in.getInt, in.getInt, in.getInt, in.getInt, in.getInt, in.getInt,
+      in.getInt, in.getInt, in.getInt, in.getInt, in.getDouble, in.getInt, in.getInt, in.getInt, in.getLong, in.getLong)
+  }
+
+  def readVocab(in: LittleEndianDataInputStream, args: Args): (Map[String, Entry], Array[String]) = {
     val vocab = new mutable.HashMap[String, Entry]
     val labels = new ArrayBuffer[String]()
-
-    val bb = ByteBuffer.allocate(9).order(ByteOrder.LITTLE_ENDIAN)
     val wb = new ArrayBuffer[Byte]
-
     for (wid <- 0 until args.size) {
-      bb.clear()
       wb.clear()
-      var b = is.read()
+      var b = in.read()
       while (b != 0) {
         wb += b.toByte
-        b = is.read()
+        b = in.read()
       }
       val word = new String(wb.toArray, "UTF-8")
 
-      is.read(bb.array(), 0, 9)
-      val count = bb.getLong
-      val tpe = bb.get
+      val count = in.getLong
+      val tpe = in.getByte
       val subwords = if (word != EOS && tpe == 0) Array(wid) ++ computeSubwords(BOW + word + EOW, args) else Array(wid)
       val entry = Entry(wid, count, tpe, subwords)
 
@@ -80,44 +111,40 @@ object FastText {
     (vocab.toMap, labels.toArray)
   }
 
-  def readVectors(is: BufferedInputStream, args: FastTextArgs): Array[Array[Float]] = {
-    require(is.read() == 0, "not implemented")
+  def using[A, B <: { def close(): Unit }](closeable: B)(f: B => A): A = {
+    try {
+      f(closeable)
+    } finally {
+      if (closeable != null) {
+        closeable.close()
+      }
+    }
+  }
 
-    val bb = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
-    val floats = ByteBuffer.allocate(args.dim * 4).order(ByteOrder.LITTLE_ENDIAN)
-    is.read(bb.array())
-    val m = bb.getLong.toInt
-    val n = bb.getLong.toInt
-    require(n * 4 == floats.capacity())
-    Array.fill(m) {
-      floats.clear()
-      is.read(floats.array())
-      Array.fill(n)(floats.getFloat)
+  def load(name: String, verbose: Boolean = false): FastText = {
+    using(new LittleEndianDataInputStream(
+      new BufferedInputStream(new FileInputStream(name)))) { in =>
+      val args = readArgs(in)
+      if (verbose) println(args)
+      // only sup/softmax supported
+      // others are the future work.
+      require(args.magic == FASTTEXT_FILEFORMAT_MAGIC_INT32)
+      require(args.version == FASTTEXT_VERSION)
+      require(args.model == MODEL_SUP)
+      require(args.loss == LOSS_SOFTMAX)
+      val (vocab, labels) = readVocab(in, args)
+      val inputVectors = Matrix.load(in)
+      val outputVectors = Matrix.load(in)
+      new FastText(args, vocab, labels, inputVectors, outputVectors)
     }
   }
 
 }
 
-class FastText(name: String) extends Serializable {
+class FastText(args: Args, vocab: Map[String, Entry], labels: Array[String],
+  inputVectors: MatrixBase, outputVectors: MatrixBase) extends Serializable {
 
   import FastText._
-
-  val is = new BufferedInputStream(new FileInputStream(name))
-  private val args: FastTextArgs = FastTextArgs.fromInputStream(is)
-  private val (vocab: Map[String, Entry], labels: Array[String]) = readVocab(is, args)
-  private val inputVectors: Array[Array[Float]] = readVectors(is, args)
-  private val outputVectors: Array[Array[Float]] = readVectors(is, args)
-  is.close()
-
-  println(args)
-
-  require(args.magic == FASTTEXT_FILEFORMAT_MAGIC_INT32)
-  require(args.version == FASTTEXT_VERSION)
-
-  // only sup/softmax supported
-  // others are the future work.
-  require(args.model == MODEL_SUP)
-  require(args.loss == LOSS_SOFTMAX)
 
   def getEntry(word: String): Entry =
     vocab.getOrElse(word, Entry(-1, 0L, 1, Array.emptyIntArray))
@@ -146,12 +173,8 @@ class FastText(name: String) extends Serializable {
 
   def computeHidden(input: Array[Int]): Array[Float] = {
     val hidden = new Array[Float](args.dim)
-    for (row <- input.map(inputVectors)) {
-      var i = 0
-      while (i < hidden.length) {
-        hidden(i) += row(i) / input.length
-        i += 1
-      }
+    for (i <- input) {
+      inputVectors.addRow(i, hidden, input.length)
     }
     hidden
   }
@@ -159,9 +182,7 @@ class FastText(name: String) extends Serializable {
   def predict(line: String, k: Int = 1): Array[(String, Float)] = {
     val line1 = getLine(line)
     val hidden = computeHidden(line1.words)
-    val output = outputVectors.map { o =>
-      o.zip(hidden).map(a => a._1 * a._2).sum
-    }
+    val output = outputVectors.dot(hidden)
     val max = output.max
     var i = 0
     var z = 0.0f
