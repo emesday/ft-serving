@@ -2,13 +2,22 @@
 
 a minimum Scala implementation for serving the fastText models
 
+# Dependency
+
+ft-serving is available on Maven Central.
+
+```
+libraryDependencies += "com.github.mskimm" %% "ft-serving" % "0.0.1"
+```
+
 # Quick Start
 
- 1. train a supervised model using [fastText](https://github.com/facebookresearch/fastText)
- 3. predict `sbt "runMain fasttext.app.Predict /path/to/fasttext-superviced-model"`
+```
+ $ sbt console
+ scala> val model = fasttext.FastText.load("data/cooking.ftz")
+ scala> model.predict("are egg whites generally available at the store ?", 1)
+```
  
 # Supports
 
- 1. supervised model / softmax loss
-   - quantization is also supported
-     - Currently, only quantized with `-qnorm=false -qout=false` is supported.
+ - supervised model (incl. quantized with `-qnorm=false -qout=false`) with softmax loss
