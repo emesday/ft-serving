@@ -132,6 +132,7 @@ object FastText {
       require(args.version == FASTTEXT_VERSION)
       require(args.model == MODEL_SUP)
       require(args.loss == LOSS_SOFTMAX)
+      require(args.pruneidxSize < 0)
       val (vocab, labels) = readVocab(in, args)
       val inputVectors = Matrix.load(in)
       val outputVectors = Matrix.load(in)
@@ -147,12 +148,29 @@ class FastText(args: Args, vocab: Map[String, Entry], labels: Array[String],
   import FastText._
 
   def getEntry(word: String): Entry =
-    vocab.getOrElse(word, Entry(-1, 0L, 1, Array.emptyIntArray))
+    vocab.getOrElse(word, Entry(-1, 0L, 0, Array.emptyIntArray))
+
+  def addWordNgrams(line: ArrayBuffer[Int], hashes: Seq[Int], n: Int): Unit = {
+    val mask = BigInt("18446744073709551615")
+    val size = hashes.length
+    var i = 0
+    while (i < size) {
+      var h = hashes(i) & mask
+      var j = i + 1
+      while (j < size && j < i + n) {
+        h = ((h * 116049371) & mask) + hashes(j)
+        line += (h % args.bucket).toInt + args.nwords
+        j += 1
+      }
+      i += 1
+    }
+  }
 
   def getLine(in: String): Line = {
     val tokens = tokenize(in)
     val words = new ArrayBuffer[Int]()
     val labels = new ArrayBuffer[Int]()
+    val wordHashes = new ArrayBuffer[Int]()
     tokens foreach { token =>
       val Entry(wid, count, tpe, subwords) = getEntry(token)
       if (tpe == 0) {
@@ -164,10 +182,12 @@ class FastText(args: Args, vocab: Map[String, Entry], labels: Array[String],
         } else {
           words ++= subwords
         }
+        wordHashes += hash(token).toInt
       } else if (tpe == 1 && wid > 0) {
         labels += wid - args.nwords
       }
     }
+    addWordNgrams(words, wordHashes, args.wordNgrams)
     Line(labels.toArray, words.toArray)
   }
 
